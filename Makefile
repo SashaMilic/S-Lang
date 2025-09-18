@@ -62,3 +62,10 @@ sanity:
 clean:
 	rm -rf $(OUT) __pycache__ .pytest_cache *.egg-info build dist
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+
+.PHONY: ir pipeline
+ir:
+	python3 -m slang.cli ir examples/loop_sugar.slang
+
+pipeline:
+	python3 -m slang.cli pipeline examples/loop_sugar.slang

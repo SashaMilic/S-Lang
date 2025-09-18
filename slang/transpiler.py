@@ -1,3 +1,5 @@
+from .ir import lower_program_to_ir, QModule
+from .passes import run_pipeline
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterable, Dict
 import re, math, os
@@ -9,6 +11,7 @@ class Transpiler:
     ancilla_budget: int = 9999
     decompose_ccx: bool = True
     coupling_map: Optional[List[Tuple[int, int]]] = None  # undirected edges
+    use_ir: bool = False
 
     def __post_init__(self):
         p = self.program
@@ -175,6 +178,49 @@ class Transpiler:
             self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}")
 
     # ---- emission driver ----
+    def _reset_emitter_state(self):
+        # Reset emitter buffers/state as the emitter expects
+        self.lines = []
+        # carry fn_defs from the original program
+        self.fn_defs = dict(getattr(self.program, "fn_defs", {}))
+
+    def _ir_to_pseudo_instrs(self, m: QModule):
+        """
+        Map IR ops into lightweight parser.Instr so we can reuse _emit().
+        SWAP is expanded into 3 CNOTs for emission.
+        """
+        from .parser import Instr
+        pseudo = []
+        # import any fn_defs learned in IR meta
+        self.fn_defs.update(m.meta.get("fn_defs", {}))
+        for fn in m.funcs.values():
+            for bb in fn.blocks:
+                for op in bb.ops:
+                    name = op.op
+                    a = op.args
+                    if name == "q.h":
+                        pseudo.append(Instr("H", (a[0], a[1])))
+                    elif name == "q.x":
+                        pseudo.append(Instr("X", (a[0], a[1])))
+                    elif name == "q.z":
+                        pseudo.append(Instr("Z", (a[0], a[1])))
+                    elif name == "q.rz_expr":
+                        pseudo.append(Instr("RZ_EXPR", (a[0], a[1], a[2])))
+                    elif name == "q.cnot_expr":
+                        pseudo.append(Instr("CNOT_EXPR", (a[0], a[1], a[2])))
+                    elif name == "q.swap_expr":
+                        # Expand SWAP to 3 CNOTs for emission
+                        pseudo.append(Instr("CNOT_EXPR", (a[0], a[1], a[2])))
+                        pseudo.append(Instr("CNOT_EXPR", (a[0], a[2], a[1])))
+                        pseudo.append(Instr("CNOT_EXPR", (a[0], a[1], a[2])))
+                    else:
+                        # Pass through other recognized ops (measure, expect, etc.)
+                        if name.startswith("q."):
+                            pseudo.append(Instr(name.split(".", 1)[1].upper(), a))
+                        else:
+                            pseudo.append(Instr("UNKNOWN", (name, a)))
+        return pseudo
+
     def _emit(self, instrs):
         for ins in instrs:
             op, args = ins.op, ins.args
@@ -290,22 +336,45 @@ class Transpiler:
                 continue
 
     def to_qasm3(self) -> str:
+        # Decide instruction stream: raw parser instructions or IR-lowered
+        instrs = self.program.instructions
+        if getattr(self, "use_ir", False):
+            # Lower to IR
+            m = lower_program_to_ir(self.program)
+            # Thread coupling map for router
+            if self.coupling_map:
+                edges = [(int(a), int(b)) for a, b in self.coupling_map]
+                m.meta["coupling"] = edges
+            # Run passes
+            _ = run_pipeline(m)
+            # Map IR → pseudo-instructions and reuse existing emitter
+            instrs = self._ir_to_pseudo_instrs(m)
+
+        # Clean emitter state
+        self._reset_emitter_state()
+        # Header
         self.lines = [
             "OPENQASM 3.0;",
             "include \"stdgates.inc\";",
             f"qubit[{self.n}] {self.r};",
             f"bit[{self.n}] c;",
         ]
-        # map named cbits
-        for ins in self.program.instructions:
+        # map named cbits from the chosen instruction stream
+        self.cbit_to_index.clear()
+        for ins in instrs:
             if ins.op == "MEASURE_ONE_EXPR":
                 _, qexpr, sym = ins.args
-                try: q = int(eval(qexpr, {"__builtins__": None}, {}))
-                except Exception: q = None
-                if q is not None: self.cbit_to_index[sym] = q
+                try:
+                    q = int(eval(qexpr, {"__builtins__": None}, {}))
+                except Exception:
+                    q = None
+                if q is not None:
+                    self.cbit_to_index[sym] = q
 
-        self._emit(self.program.instructions)
+        # Emit
+        self._emit(instrs)
 
+        # Metrics footer
         depth = max(self.depth) if self.depth else 0
         twoq_depth = max(self.twoq_depth) if self.twoq_depth else 0
         twoq_count = self.stats["cx"] + self.stats["ccx"] + self.stats["cp"]
