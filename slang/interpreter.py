@@ -102,11 +102,11 @@ class Interpreter:
         if len(bitstr) != self.p.n_qubits:
             raise ValueError("MARKSTATE bitstring length must match register size")
         n = self.p.n_qubits
-        # Multiply amplitude of matching basis state by -1
+        # Compute basis index with leftmost char = MSB
         idx = 0
-        for i, b in enumerate(reversed(bitstr)):  # bit 0 = r[0] (LSB)
+        for i, b in enumerate(bitstr):          # i = 0..n-1 over MSB..LSB
             if b == '1':
-                idx |= (1 << i)
+                idx |= (1 << (n - 1 - i))       # set bit (MSB at position n-1)
         self.state.state[idx] *= -1
 
     def _diffusion_exact(self):
