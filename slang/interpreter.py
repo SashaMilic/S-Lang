@@ -25,6 +25,13 @@ class Interpreter:
         self.env = {}
         self.cbits = {}
         self.counts = None
+        if program.seed is not None:
+            try:
+                # If your StateVector uses numpy’s RNG internally,
+                # this will make sample_all() deterministic.
+                np.random.seed(program.seed)
+            except Exception:
+                pass
         self.fn_defs = dict(getattr(program, "fn_defs", {}))
 
     def _idx(self, expr: str) -> int:
