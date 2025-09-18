@@ -34,13 +34,25 @@ class Interpreter:
         return val
 
     def _run_text(self, text: str):
+        # Parse a snippet (FN body, IF/ELSE body, loop body) and inherit
+        # the parent program's allocation context so we don't require an
+        # ALLOCATE inside the snippet.
         sub = Program(text).parse()
+        # Inherit context from parent
+        sub.n_qubits = self.p.n_qubits
+        sub.reg_name = self.p.reg_name
+        sub.fn_defs = dict(self.fn_defs)
+    
+        # Execute in the same runtime state
         it = Interpreter(sub)
         it.state = self.state
         it.env = self.env
         it.cbits = self.cbits
         it.fn_defs = dict(self.fn_defs)
+    
         it.run()
+    
+        # Propagate back
         self.state = it.state
         self.env = it.env
         self.cbits = it.cbits

@@ -127,17 +127,49 @@ class Program:
 
             # --------------- New: Functions ------------------------------
             if re.match(r"FN\s+\w+\s*\((.*?)\)\s*\{", ln, re.I):
-                name, arglist = re.match(r"FN\s+(\w+)\s*\((.*?)\)\s*\{", ln, re.I).groups()
+                # Support both:
+                #  a) Multi-line:
+                #       FN NAME(a,b) {
+                #         ...
+                #       }
+                #       ENDFN
+                #  b) Single-line:
+                #       FN NAME(a,b) { CNOT r[a], r[b] } ENDFN
+                m_hdr = re.match(r"FN\s+(\w+)\s*\((.*?)\)\s*\{", ln, re.I)
+                name, arglist = m_hdr.group(1), m_hdr.group(2)
                 args = [a.strip() for a in arglist.split(",")] if arglist.strip() else []
+                # Check if the same line contains the full body and ENDFN
+                tail = ln[m_hdr.end():].strip()
+                if tail:
+                    m_inline = re.match(r"^(.*)\}\s*ENDFN\s*$", tail, re.I)
+                    if m_inline:
+                        body_inside = m_inline.group(1).strip()
+                        # Split inline body by ';' into logical lines
+                        parts = [p.strip() for p in re.split(r";\s*", body_inside) if p.strip()]
+                        body = "\n".join(parts) + ("\n" if parts else "")
+                        self.fn_defs[name] = (args, body)
+                        self.instructions.append(Instr("FN_DEF", (name, args, body)))
+                        i += 1
+                        continue
+                # Otherwise, fall back to multi-line body until ENDFN
                 i += 1
                 body_lines: List[str] = []
+                # accept a closing '}' line and then 'ENDFN' on the next line(s)
                 while i < len(lines) and not re.match(r"ENDFN", lines[i], re.I):
                     if lines[i].strip() == "}":
-                        i += 1; continue
-                    body_lines.append(lines[i]); i += 1
-                if i == len(lines): raise ValueError("ENDFN missing")
+                        i += 1
+                        # allow optional blank/comment lines before ENDFN
+                        while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith(("#","//"))):
+                            i += 1
+                        # do not consume ENDFN here; outer while condition handles it
+                        continue
+                    body_lines.append(lines[i])
+                    i += 1
+                if i == len(lines):
+                    raise ValueError("ENDFN missing")
+                # consume ENDFN
                 i += 1
-                body = "\n".join(body_lines) + "\n"
+                body = "\n".join(body_lines) + ("\n" if body_lines else "")
                 self.fn_defs[name] = (args, body)
                 self.instructions.append(Instr("FN_DEF", (name, args, body)))
                 continue
