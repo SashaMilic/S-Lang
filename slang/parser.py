@@ -91,7 +91,7 @@ class Program:
                 reg = re.match(r"DIFFUSION\s+(\w+)$", ln, re.I).group(1)
                 self.instructions.append(Instr("DIFFUSION", (reg,))); i += 1; continue
 
-            # --------------- New: Grover ops -----------------
+            # --------------- Grover ops -----------------
             if re.match(r"MARKSTATE\s+\w+\s+\"[01]+\"$", ln, re.I):
                 reg, bitstr = re.match(r"MARKSTATE\s+(\w+)\s+\"([01]+)\"$", ln, re.I).groups()
                 self.instructions.append(Instr("MARKSTATE", (reg, bitstr))); i += 1; continue
@@ -100,7 +100,7 @@ class Program:
                 reg, bitstr = re.match(r"GROVER_ITERATE\s+(\w+)\s+\"([01]+)\"$", ln, re.I).groups()
                 self.instructions.append(Instr("GROVER_ITERATE", (reg, bitstr))); i += 1; continue
 
-            # --------------- New: QFT/IQFT (from last patch) -------------
+            # --------------- QFT/IQFT -------------
             if re.match(r"QFT\s+\w+(?:\s+NOSWAP)?$", ln, re.I):
                 m = re.match(r"QFT\s+(\w+)(?:\s+(NOSWAP))?$", ln, re.I)
                 reg = m.group(1); noswap = bool(m.group(2))
@@ -112,7 +112,7 @@ class Program:
                 reverse = True if (rev is None or rev.lower()=="true") else False
                 self.instructions.append(Instr("IQFT", (reg, reverse))); i += 1; continue
 
-            # --------------- New: EXPECT / VAR ---------------------------
+            # --------------- EXPECT / VAR ---------------------------
             if re.match(r"EXPECT\s+\"[IXYZ]+\"\s+\w+\[.+\](?:\s*,\s*\w+\[.+\])*$", ln, re.I):
                 m = re.match(r"EXPECT\s+\"([IXYZ]+)\"\s+(.+)$", ln, re.I)
                 pauli = m.group(1)
@@ -125,50 +125,51 @@ class Program:
                 regs = [s.strip() for s in m.group(2).split(",")]
                 self.instructions.append(Instr("VAR", (pauli, regs))); i += 1; continue
 
-            # --------------- New: Functions ------------------------------
+            # --------------- Modules / Debug / IO -------------------
+            if re.match(r'IMPORT\s+"[^"]+"\s*$', ln, re.I):
+                path = re.match(r'IMPORT\s+"([^"]+)"\s*$', ln, re.I).group(1)
+                self.instructions.append(Instr("IMPORT", (f'"{path}"',))); i += 1; continue
+
+            if re.match(r'TRACE\s+"[^"]+"\s*$', ln, re.I):
+                msg = re.match(r'TRACE\s+"([^"]+)"\s*$', ln, re.I).group(1)
+                self.instructions.append(Instr("TRACE", (f'"{msg}"',))); i += 1; continue
+
+            if re.match(r'DUMPSTATE\s*$', ln, re.I):
+                self.instructions.append(Instr("DUMPSTATE", tuple())); i += 1; continue
+
+            if re.match(r'PROBS\s*$', ln, re.I):
+                self.instructions.append(Instr("PROBS", tuple())); i += 1; continue
+
+            # --------------- Functions ------------------------------
+            # FN definitions: support both single-line "{ ... } ENDFN" and multi-line bodies
             if re.match(r"FN\s+\w+\s*\((.*?)\)\s*\{", ln, re.I):
-                # Support both:
-                #  a) Multi-line:
-                #       FN NAME(a,b) {
-                #         ...
-                #       }
-                #       ENDFN
-                #  b) Single-line:
-                #       FN NAME(a,b) { CNOT r[a], r[b] } ENDFN
+                # Single- or multi-line FN
                 m_hdr = re.match(r"FN\s+(\w+)\s*\((.*?)\)\s*\{", ln, re.I)
                 name, arglist = m_hdr.group(1), m_hdr.group(2)
                 args = [a.strip() for a in arglist.split(",")] if arglist.strip() else []
-                # Check if the same line contains the full body and ENDFN
                 tail = ln[m_hdr.end():].strip()
                 if tail:
                     m_inline = re.match(r"^(.*)\}\s*ENDFN\s*$", tail, re.I)
                     if m_inline:
                         body_inside = m_inline.group(1).strip()
-                        # Split inline body by ';' into logical lines
                         parts = [p.strip() for p in re.split(r";\s*", body_inside) if p.strip()]
                         body = "\n".join(parts) + ("\n" if parts else "")
                         self.fn_defs[name] = (args, body)
                         self.instructions.append(Instr("FN_DEF", (name, args, body)))
                         i += 1
                         continue
-                # Otherwise, fall back to multi-line body until ENDFN
+                # multi-line body until ENDFN
                 i += 1
                 body_lines: List[str] = []
-                # accept a closing '}' line and then 'ENDFN' on the next line(s)
                 while i < len(lines) and not re.match(r"ENDFN", lines[i], re.I):
                     if lines[i].strip() == "}":
                         i += 1
-                        # allow optional blank/comment lines before ENDFN
                         while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith(("#","//"))):
                             i += 1
-                        # do not consume ENDFN here; outer while condition handles it
                         continue
-                    body_lines.append(lines[i])
-                    i += 1
-                if i == len(lines):
-                    raise ValueError("ENDFN missing")
-                # consume ENDFN
-                i += 1
+                    body_lines.append(lines[i]); i += 1
+                if i == len(lines): raise ValueError("ENDFN missing")
+                i += 1  # consume ENDFN
                 body = "\n".join(body_lines) + ("\n" if body_lines else "")
                 self.fn_defs[name] = (args, body)
                 self.instructions.append(Instr("FN_DEF", (name, args, body)))
@@ -178,6 +179,19 @@ class Program:
                 name, argexprs = re.match(r"CALL\s+(\w+)\s*\((.*?)\)$", ln, re.I).groups()
                 vals = [x.strip() for x in argexprs.split(",")] if argexprs.strip() else []
                 self.instructions.append(Instr("CALL", (name, vals))); i += 1; continue
+
+            # CALLR target = F(args)
+            if re.match(r'CALLR\s+\w+\s*=\s*\w+\s*\((.*?)\)\s*$', ln, re.I):
+                tgt, fname, arglist = re.match(
+                    r'CALLR\s+(\w+)\s*=\s*(\w+)\s*\((.*?)\)\s*$', ln, re.I
+                ).groups()
+                vals = [x.strip() for x in arglist.split(",")] if arglist.strip() else []
+                self.instructions.append(Instr("CALLR", (fname, vals, tgt))); i += 1; continue
+
+            # RETURN <expr> (appears in FN bodies; we still allow at top level and interpreter will error if misused)
+            if re.match(r'RETURN\s+.+$', ln, re.I):
+                expr = re.match(r'RETURN\s+(.+)$', ln, re.I).group(1)
+                self.instructions.append(Instr("RETURN", (expr,))); i += 1; continue
 
             # --------------- Measure ------------------------------------
             if re.match(r"MEASURE\s+\w+\[\s*.+\s*\]\s+AS\s+\w+$", ln, re.I):

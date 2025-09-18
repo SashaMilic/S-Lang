@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterable, Dict
-import re, math
+import re, math, os
 from .parser import Program
 
 @dataclass
@@ -231,6 +231,63 @@ class Transpiler:
                     sub = re.sub(rf"\br\[\s*{re.escape(f)}\s*\]", f"r[{int(eval(v, {'__builtins__':None}, {}))}]", sub)
                 sub_p = Program(sub).parse()
                 self._emit(sub_p.instructions); continue
+
+            if op == "IMPORT":
+                (path_literal,) = args
+                path = path_literal.strip('"')
+                try:
+                    with open(path, "r") as f:
+                        text = f.read()
+                    sub_p = Program(text).parse()
+                    # bring in any function definitions from the module
+                    self.fn_defs.update(getattr(sub_p, "fn_defs", {}))
+                    # inline the imported program
+                    self._emit(sub_p.instructions)
+                except Exception as e:
+                    self._add(f"// ERROR: IMPORT '{path}': {e}")
+                continue
+  
+            if op == "TRACE":
+                (msg_literal,) = args
+                msg = msg_literal.strip('"')
+                self._add(f"// TRACE: {msg}")
+                continue
+  
+            if op == "DUMPSTATE":
+                self._add("// DUMPSTATE (interpreter-only)")
+                continue
+  
+            if op == "PROBS":
+                self._add("// PROBS (interpreter-only)")
+                continue
+  
+            if op == "RETURN":
+                (expr,) = args
+                self._add(f"// RETURN {expr} (classical; ignored in QASM)")
+                continue
+  
+            if op == "CALLR":
+                # Inline body with integer substitutions (like CALL);
+                # classical return is ignored in QASM, but we note it.
+                name, vals, target = args
+                if name not in self.fn_defs:
+                    self._add(f"// ERROR: unknown CALLR {name}")
+                    continue
+                formal, body = self.fn_defs[name]
+                if len(formal) != len(vals):
+                    self._add(f"// ERROR: CALLR {name} arity mismatch")
+                    continue
+                sub = body
+                for f, v in zip(formal, vals):
+                    sub = re.sub(
+                        rf"\br\[\s*{re.escape(f)}\s*\]",
+                        f"r[{int(eval(v, {'__builtins__': None}, {}))}]",
+                        sub,
+                    )
+                sub_p = Program(sub).parse()
+                self._emit(sub_p.instructions)
+                self._add(f"// NOTE: CALLR {name} -> return assigned to {target} (classical), ignored in QASM")
+                continue
 
     def to_qasm3(self) -> str:
         self.lines = [

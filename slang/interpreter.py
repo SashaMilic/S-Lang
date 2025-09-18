@@ -1,7 +1,7 @@
 from .parser import Program, eval_expr
 from .runtime import StateVector, H, X, Z, Rz, CNOT_4
 import numpy as np
-import math, cmath, re
+import math, cmath, re, os
 from typing import List
 
 def _cr_phase(theta: float) -> np.ndarray:
@@ -14,6 +14,10 @@ _P = {
     "Y": np.array([[0,-1j],[1j,0]], dtype=np.complex128),
     "Z": np.array([[1,0],[0,-1]], dtype=np.complex128),
 }
+
+class ReturnSignal(Exception):
+    def __init__(self, value):
+        self.value = value
 
 class Interpreter:
     """Tiny statevector interpreter for a subset of S-Lang (+ Grover, EXPECT/VAR, FN/CALL)."""
@@ -34,6 +38,13 @@ class Interpreter:
                 pass
         self.fn_defs = dict(getattr(program, "fn_defs", {}))
 
+    def _eval_int(self, expr: str) -> int:
+        scope = {"__builtins__": None}
+        # allow previously computed LET variables
+        for k, v in self.env.items():
+            scope[k] = int(v) if isinstance(v, (int, float)) else v
+        return int(eval(expr, scope, {}))
+
     def _idx(self, expr: str) -> int:
         val = int(round(eval(expr, {"__builtins__": None}, {})))
         if not (0 <= val < self.p.n_qubits):
@@ -45,20 +56,32 @@ class Interpreter:
         # the parent program's allocation context so we don't require an
         # ALLOCATE inside the snippet.
         sub = Program(text).parse()
-        # Inherit context from parent
+        # Inherit context from parent and MERGE function defs
         sub.n_qubits = self.p.n_qubits
         sub.reg_name = self.p.reg_name
-        sub.fn_defs = dict(self.fn_defs)
-    
+        # Keep sub's own parsed fn_defs and also add parent's
+        merged_fns = dict(sub.fn_defs)
+        merged_fns.update(self.fn_defs)
+        sub.fn_defs = merged_fns
+
         # Execute in the same runtime state
         it = Interpreter(sub)
         it.state = self.state
         it.env = self.env
         it.cbits = self.cbits
-        it.fn_defs = dict(self.fn_defs)
-    
-        it.run()
-    
+        # pass merged fn table
+        it.fn_defs = dict(sub.fn_defs)
+
+        try:
+            it.run()
+        except ReturnSignal as rs:
+            # Propagate state and the return to the caller
+            self.state = it.state
+            self.env = it.env
+            self.cbits = it.cbits
+            self.counts = it.counts
+            self.fn_defs = it.fn_defs
+            raise
         # Propagate back
         self.state = it.state
         self.env = it.env
@@ -153,7 +176,83 @@ class Interpreter:
         for ins in self.p.instructions:
             op, args = ins.op, ins.args
 
-            if op in ("ALLOCATE", "LET", "FN_DEF"):
+            if op in ("ALLOCATE", "FN_DEF"):
+                continue
+
+            if op == "LET":
+                name, expr = args
+                self.env[name] = self._eval_int(expr)
+                continue
+
+            if op == "IMPORT":
+                (path_literal,) = args
+                path = path_literal.strip('"')
+                with open(path, "r") as f:
+                    text = f.read()
+                sub = Program(text).parse()
+                # Merge imported function definitions into current table
+                self.fn_defs.update(sub.fn_defs)
+                # We intentionally do NOT execute the module at import time.
+                continue
+
+            if op == "TRACE":
+                (msg_literal,) = args
+                msg = msg_literal.strip('"')
+                print(f"[TRACE] {msg}")
+                continue
+
+            if op == "DUMPSTATE":
+                n = self.p.n_qubits
+                psi = self.state.state
+                print("[DUMPSTATE] amplitudes (non-zero):")
+                for i, amp in enumerate(psi):
+                    if abs(amp) > 1e-12:
+                        print(f"  |{i:0{n}b}>: amp={amp.real:+.6f}{amp.imag:+.6f}j  p={abs(amp)**2:.6f}")
+                continue
+
+            if op == "PROBS":
+                n = self.p.n_qubits
+                psi = self.state.state
+                from collections import defaultdict
+                probs = defaultdict(float)
+                for i, amp in enumerate(psi):
+                    p = float((amp.conjugate() * amp).real)
+                    if p > 1e-12:
+                        probs[f"{i:0{n}b}"] += p
+                print("[PROBS]")
+                for k in sorted(probs.keys()):
+                    print(f"  {k}: {probs[k]:.6f}")
+                continue
+
+            if op == "RETURN":
+                (expr,) = args
+                raise ReturnSignal(self._eval_int(expr))
+
+            if op == "CALLR":
+                fname, vals, target = args
+                if fname not in self.fn_defs:
+                    raise ValueError(f"Unknown function {fname}")
+                formal, body = self.fn_defs[fname]
+                if len(formal) != len(vals):
+                    raise ValueError("CALLR arity mismatch")
+                # Evaluate actual arguments once
+                evald = []
+                for v in vals:
+                    evald.append(int(eval(v, {"__builtins__": None}, {})))
+                # Textual substitution for qubit indices and bare symbols
+                subst = body
+                for f, vnum in zip(formal, evald):
+                    # replace qubit-indexed occurrences
+                    subst = re.sub(rf"\br\[\s*{re.escape(f)}\s*\]", f"r[{vnum}]", subst)
+                    # replace bare parameter tokens in expressions (e.g., RETURN a+b)
+                    subst = re.sub(rf"\b{re.escape(f)}\b", str(vnum), subst)
+                try:
+                    self._run_text(subst)
+                except ReturnSignal as rs:
+                    self.env[target] = int(rs.value)
+                else:
+                    # No RETURN in function body -> default 0
+                    self.env[target] = 0
                 continue
 
             if op in ("H", "X", "Z"):

@@ -52,6 +52,10 @@ metrics:
 		$(PY) tools/qasm_to_qiskit_metrics.py $$f; \
 	done
 
+# CI-friendly metrics run: transpile then analyze (ensures OUT exists)
+.PHONY: metrics-ci
+metrics-ci: transpile metrics
+
 sanity:
 	bash tools/sanity.sh
 

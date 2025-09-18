@@ -87,3 +87,61 @@ requirements.txt
 ## License
 
 MIT (prototype).
+
+## Novelty
+
+What exists today
+-----------------
+
+- Qiskit, Cirq, PyQuil, and other quantum SDKs provide quantum circuit construction, simulation, transpilation, and metrics.
+- QASM 2.0 and 3.0 are standard quantum assembly languages for circuit description.
+- Qiskit and others have transpilers that output QASM and track metrics like depth, T-count, etc.
+- Some DSLs exist for quantum programming (Silq, Quipper, etc.), but most are either embedded in a host language or focus on high-level algorithmic constructs.
+
+What you are doing
+------------------
+
+- S-Lang is a small, **quantum-native DSL** where the unit of computation is a *state* (in a Hilbert space), not a classical bitstring.
+- It operates directly on states and subspaces using linear operators, with measurement as an explicit effect.
+- The repo provides:
+  - A **parser** for a compact, gate-level DSL.
+  - A **statevector interpreter** for quick simulations.
+  - A **QASM 3 transpiler** with accurate-ish metrics (depth, two-qubit depth, T-count, T-depth).
+  - Optional **routing** on a coupling map (inserts SWAPs).
+  - A **QASM→Qiskit metrics loader** for parity.
+- The language supports control flow (if/elif/else), "loop sugar," and measurement as first-class constructs.
+- The prototype is designed for educational use and to explore "quantum-native" language design, not as a production toolchain.
+
+So, does it already exist?
+--------------------------
+
+- No existing tool combines all these aspects in this form:
+  - A minimal, standalone DSL focused on quantum states as the primitive, with explicit measurement and subspace manipulation.
+  - A parser/interpreter/transpiler pipeline with routing, metrics, and QASM3 emission, all in a small educational package.
+- Existing frameworks are either much larger, embedded in Python, or do not focus on the "state as primitive" approach.
+- This project is novel as a compact, self-contained, quantum-native language and toolchain prototype.
+
+
+# Roadmap (pragmatic, developer-oriented)
+##	Language ergonomics
+  •	Modules & imports, namespacing, standard library packaging.
+  •	Functions with return values, integer/float params, expression grammar.
+  •	Debuggability: TRACE, DUMPSTATE, PROBS, ASSERT (runtime checks).
+  •	Structured errors (line/col, callsite context).
+##	Core IR + passes
+  •	Lower parser → SSA-like quantum IR (qubit sets, effects, classical blocks).
+  •	Pass framework: const-fold, canonicalize, decompose, route, schedule, cost.
+  •	Deterministic pass pipeline with dump points.
+##	Backends
+  •	QASM3 (we have), QIR stub, Qiskit builder parity.
+  •	Simulators: statevector (we have), density matrix & noise channels.
+  •	Optional pulse hooks (future).
+##	Algorithms & tooling
+  •	Stdlib: Grover (done), QFT/IQFT (done), VQE (optimizer + grouping), QPE, phase kickback helpers.
+  •	Measurement grouping: commutation classes, greedy & exact clique partitioning.
+  •	Small optimizer suite: COBYLA, Nelder–Mead, SPSA (shot-frugal), plus seed control.
+##	HW realism
+  •	Coupling/routing (we have), swap depth model, simple scheduling, T-depth (we track), calibrations (uture).
+##	DX
+  •	scli rich CLI: run, transpile, metrics, visualize, diff IR, explain cost.
+  •	Jupyter-friendly API, VSCode syntax, docs site.
