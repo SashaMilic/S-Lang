@@ -23,10 +23,23 @@ class Transpiler:
         self.tstage = [0] * self.n; self.t_block = [True] * self.n
         self.cbit_to_index: Dict[str, int] = {}
         self.fn_defs = dict(getattr(p, "fn_defs", {}))
-        self._adj = {q:set() for q in range(self.n)}
+        # Build symmetric adjacency for routing. Be robust to non-int entries
+        # or indices outside [0, n-1] by coercing to int and creating buckets
+        # on demand.
+        self._adj = {q: set() for q in range(self.n)}
         if self.coupling_map:
-            for a,b in self.coupling_map:
-                self._adj[a].add(b); self._adj[b].add(a)
+            for a, b in self.coupling_map:
+                # coerce to int if they came as strings
+                try:
+                    ai, bi = int(a), int(b)
+                except Exception:
+                    # skip malformed entries
+                    continue
+                # tolerate indices beyond current n by creating buckets
+                if ai not in self._adj: self._adj[ai] = set()
+                if bi not in self._adj: self._adj[bi] = set()
+                self._adj[ai].add(bi)
+                self._adj[bi].add(ai)
 
     # ---- metrics helpers ----
     def _add(self, s: str): self.lines.append(s)

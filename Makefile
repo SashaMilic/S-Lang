@@ -55,11 +55,15 @@ test:
 transpile examples:
 	mkdir -p $(OUT)
 	@for f in $(EXAMPLES); do \
-	 base=$$(basename $$f .slang); \
-	 echo "[transpile] $$f -> $(OUT)/$$base.qasm"; \
-	 $(PY) -m slang.cli transpile $$f \
-	   --coupling '$(COUPLING)' \
-	   -o $(OUT)/$$base.qasm || exit $$?; \
+	  base=$$(basename $$f .slang); \
+	  if grep -qE '^\s*ALLOCATE\s' "$$f"; then \
+	    echo "[transpile] $$f -> $(OUT)/$$base.qasm"; \
+	    $(PY) -m slang.cli transpile $$f \
+	      --coupling '$(COUPLING)' \
+	      -o $(OUT)/$$base.qasm || exit $$?; \
+	  else \
+	    echo "[skip] $$f (no ALLOCATE; module-only)"; \
+	  fi; \
 	done
 	@ls -1 $(OUT)/*.qasm
 
@@ -67,21 +71,32 @@ transpile examples:
 transpile-ir:
 	mkdir -p $(OUT)
 	@for f in $(EXAMPLES); do \
-	 base=$$(basename $$f .slang); \
-	 echo "[transpile-ir] $$f -> $(OUT)/$$base.ir.qasm"; \
-	 $(PY) -m slang.cli transpile $$f \
-	   --use-ir \
-	   --coupling '$(COUPLING)' \
-	   -o $(OUT)/$$base.ir.qasm || exit $$?; \
+	  base=$$(basename $$f .slang); \
+	  if grep -qE '^\s*ALLOCATE\s' "$$f"; then \
+	    echo "[transpile-ir] $$f -> $(OUT)/$$base.ir.qasm"; \
+	    $(PY) -m slang.cli transpile $$f \
+	      --use-ir \
+	      --coupling '$(COUPLING)' \
+	      -o $(OUT)/$$base.ir.qasm || exit $$?; \
+	  else \
+	    echo "[skip] $$f (no ALLOCATE; module-only)"; \
+	  fi; \
 	done
+	# Example with routing using a line coupling (override COUPLING as needed)
+	$(PY) -m slang.cli transpile examples/routed_line_cx.slang \
+	  --use-ir \
+	  --coupling '$(COUPLING)' \
+	  -o $(OUT)/routed_line_cx.ir.qasm
 	@ls -1 $(OUT)/*.ir.qasm || true
 
 # Run parity metrics via Qiskit loader on everything in $(OUT)
 metrics:
 	@set -e; \
-	for f in $(OUT)/*.qasm; do \
-		echo "== $$f =="; \
-		$(PY) tools/qasm_to_qiskit_metrics.py $$f; \
+	set -- $(wildcard $(OUT)/*.qasm); \
+	if [ "$$#" -eq 0 ]; then echo "== no QASM files in $(OUT)/ =="; exit 0; fi; \
+	for q in "$$@"; do \
+	  echo "[metrics] $$q"; \
+	  $(PY) tools/qasm_to_qiskit_metrics.py $$q || exit $$?; \
 	done
 
 # CI-friendly metrics run: transpile then analyze (ensures OUT exists)
