@@ -165,30 +165,86 @@ class Transpiler:
                 self._cp(k, j, theta)
             self._h(j)
 
-    def _emit_if_chain(self, blocks: List[Tuple[str, str, List[str]]]):
-        def mapc(expr: str):
+    def _emit_if_chain(self, blocks: List[Tuple[str, str, List[str]]]):  # [(kind, cond, body)]
+        def mapc(expr: str) -> str:
             out = expr
             for name, idx in self.cbit_to_index.items():
-                out = re.sub(rf"\b{name}\b", f"c[{idx}]", out)
+                out = re.sub(rf"\b{re.escape(name)}\b", f"c[{idx}]", out)
             return out
+
+        def norm_cond(expr: str) -> str:
+            # Collapse doubled parentheses and trim whitespace.
+            s = mapc(expr.strip())
+            while "((" in s:
+                s = s.replace("((", "(")
+            while "))" in s:
+                s = s.replace("))", ")")
+            s = re.sub(r"\(\s+", "(", s)
+            s = re.sub(r"\s+\)", ")", s)
+            return s
+
         def emit_body(lines: List[str]):
             sub = Program("\n".join(lines) + "\n").parse()
             self._emit(sub.instructions)
+
+        first = True
         for kind, cond, body in blocks:
+            if first:
+                # First block must be IF
+                c = norm_cond(cond)
+                self._add(f"if ({c}) {{")
+                emit_body(body)
+                self._add("}")
+                first = False
+                continue
+
             if kind == "ELSE":
-                self._add("else {"); emit_body(body); self._add("}"); continue
+                self._add("else {")
+                emit_body(body)
+                self._add("}")
+                continue
+
+            # For "else if" chains, emit as: else { if (cond) { ... } }
             c = cond.strip()
+            # Handle compound ops with short-circuit lowering inside the nested if
             if "&&" in c and "||" in c:
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}"); continue
+                self._add("else {")
+                self._add(f"  if ({norm_cond(c)}) {{")
+                emit_body(body)
+                self._add("  }")
+                self._add("}")
+                continue
+
             if "&&" in c:
                 left, right = [x.strip() for x in c.split("&&", 1)]
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(left)}) {{")
-                self._add(f"  if ({mapc(right)}) {{"); emit_body(body); self._add("  }"); self._add("}"); continue
+                self._add("else {")
+                self._add(f"  if ({norm_cond(left)}) {{")
+                self._add(f"    if ({norm_cond(right)}) {{")
+                emit_body(body)
+                self._add("    }")
+                self._add("  }")
+                self._add("}")
+                continue
+
             if "||" in c:
                 left, right = [x.strip() for x in c.split("||", 1)]
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(left)}) {{")
-                emit_body(body); self._add("} else if (" + mapc(right) + ") {"); emit_body(body); self._add("}"); continue
-            self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}")
+                self._add("else {")
+                self._add(f"  if ({norm_cond(left)}) {{")
+                emit_body(body)
+                self._add("  } else {")
+                self._add(f"    if ({norm_cond(right)}) {{")
+                emit_body(body)
+                self._add("    }")
+                self._add("  }")
+                self._add("}")
+                continue
+
+            # Simple else-if case
+            self._add("else {")
+            self._add(f"  if ({norm_cond(c)}) {{")
+            emit_body(body)
+            self._add("  }")
+            self._add("}")
 
     # ---- emission driver ----
     def _reset_emitter_state(self):
