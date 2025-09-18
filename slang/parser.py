@@ -36,7 +36,7 @@ class Program:
                 s = s.split("#", 1)[0].rstrip()
             if s:
                 lines.append(s)
-        # Normalize any literal "\n" that might have been embedded, and resplit.
+        # Normalize literal "\n" into real newlines then resplit (robust for nested bodies)
         norm_lines: List[str] = []
         for s in lines:
             if "\\n" in s:
@@ -53,34 +53,29 @@ class Program:
 
             if re.match(r"SEED\s+\d+", ln, re.I):
                 self.seed = int(re.match(r"SEED\s+(\d+)", ln, re.I).group(1))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"LET\s+\w+\s*=\s*.+$", ln, re.I):
                 name, expr = re.match(r"LET\s+(\w+)\s*=\s*(.+)$", ln, re.I).groups()
                 self.instructions.append(Instr("LET", (name, expr)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"ALLOCATE\s+\w+\s+\d+", ln, re.I):
                 m = re.match(r"ALLOCATE\s+(\w+)\s+(\d+)", ln, re.I)
                 reg, n = m.group(1), int(m.group(2))
                 self.reg_name, self.n_qubits = reg, n
                 self.instructions.append(Instr("ALLOCATE", (reg, n)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"(H|X|Z)\s+\w+\[\s*.+\s*\]$", ln, re.I):
                 g, reg, qexpr = re.match(r"(H|X|Z)\s+(\w+)\[\s*(.+)\s*\]$", ln, re.I).groups()
                 self.instructions.append(Instr(g.upper(), (reg, qexpr)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"RZ\s+.+\s+\w+\[\s*.+\s*\]$", ln, re.I):
                 th, reg, qexpr = re.match(r"RZ\s+(.+)\s+(\w+)\[\s*(.+)\s*\]$", ln, re.I).groups()
                 self.instructions.append(Instr("RZ_EXPR", (reg, qexpr, th)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"CNOT\s+\w+\[\s*.+\s*\]\s*,\s*\w+\[\s*.+\s*\]$", ln, re.I):
                 reg1, q1expr, reg2, q2expr = re.match(
@@ -89,76 +84,72 @@ class Program:
                 if reg1 != reg2:
                     raise ValueError("CNOT must use the same register on both operands")
                 self.instructions.append(Instr("CNOT_EXPR", (reg1, q1expr, q2expr)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"HADAMARD_LAYER\s+\w+$", ln, re.I):
                 reg = re.match(r"HADAMARD_LAYER\s+(\w+)$", ln, re.I).group(1)
                 self.instructions.append(Instr("HADAMARD_LAYER", (reg,)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"DIFFUSION\s+\w+$", ln, re.I):
                 reg = re.match(r"DIFFUSION\s+(\w+)$", ln, re.I).group(1)
                 self.instructions.append(Instr("DIFFUSION", (reg,)))
-                i += 1
-                continue
+                i += 1; continue
+
+            # ---- NEW: QFT / IQFT ----
+            if re.match(r"QFT\s+\w+(?:\s+NOSWAP)?$", ln, re.I):
+                m = re.match(r"QFT\s+(\w+)(?:\s+(NOSWAP))?$", ln, re.I)
+                reg = m.group(1); noswap = bool(m.group(2))
+                self.instructions.append(Instr("QFT", (reg, noswap)))
+                i += 1; continue
+
+            if re.match(r"IQFT\s+\w+(?:\s+REVERSE\s*=\s*(?:true|false))?$", ln, re.I):
+                m = re.match(r"IQFT\s+(\w+)(?:\s+REVERSE\s*=\s*(true|false))?$", ln, re.I)
+                reg = m.group(1); rev = m.group(2)
+                reverse = True if (rev is None or rev.lower()=="true") else False
+                self.instructions.append(Instr("IQFT", (reg, reverse)))
+                i += 1; continue
+            # -------------------------
 
             if re.match(r"MEASURE\s+\w+\[\s*.+\s*\]\s+AS\s+\w+$", ln, re.I):
                 reg, qexpr, sym = re.match(
                     r"MEASURE\s+(\w+)\[\s*(.+)\s*\]\s+AS\s+(\w+)$", ln, re.I
                 ).groups()
                 self.instructions.append(Instr("MEASURE_ONE_EXPR", (reg, qexpr, sym)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"MEASURE\s+\w+(?:\s+SHOTS\s+\d+)?$", ln, re.I):
                 m = re.match(r"MEASURE\s+(\w+)\s*(?:SHOTS\s+(\d+))?$", ln, re.I)
-                reg = m.group(1)
-                shots = int(m.group(2)) if m.group(2) else 1024
+                reg = m.group(1); shots = int(m.group(2)) if m.group(2) else 1024
                 self.instructions.append(Instr("MEASURE_ALL", (reg, shots)))
-                i += 1
-                continue
+                i += 1; continue
 
             if re.match(r"IF\s+(.+)\s*\{", ln, re.I):
                 cond = re.match(r"IF\s+(.+)\s*\{", ln, re.I).group(1).strip()
-                i += 1
-                blocks: List[Tuple[str, str, List[str]]] = [("IF", cond, [])]
+                i += 1; blocks: List[Tuple[str, str, List[str]]] = [("IF", cond, [])]
                 while i < len(lines):
                     if re.match(r"ELIF\s+(.+)\s*\{", lines[i], re.I):
                         c2 = re.match(r"ELIF\s+(.+)\s*\{", lines[i], re.I).group(1).strip()
-                        i += 1
-                        blocks.append(("ELIF", c2, []))
-                        continue
+                        i += 1; blocks.append(("ELIF", c2, [])); continue
                     if re.match(r"ELSE\s*\{", lines[i], re.I):
-                        i += 1
-                        blocks.append(("ELSE", "", []))
-                        continue
+                        i += 1; blocks.append(("ELSE", "", [])); continue
                     if re.match(r"ENDIF", lines[i], re.I):
-                        i += 1
-                        break
+                        i += 1; break
                     if lines[i].strip() == "}":
-                        i += 1
-                        continue
-                    blocks[-1][2].append(lines[i])
-                    i += 1
+                        i += 1; continue
+                    blocks[-1][2].append(lines[i]); i += 1
                 self.instructions.append(Instr("IF_CHAIN", (blocks,)))
                 continue
 
             if re.match(r"FOR\s+\w+\s+IN\s+\w+\s*\{", ln, re.I):
                 var, reg = re.match(r"FOR\s+(\w+)\s+IN\s+(\w+)", ln, re.I).groups()
-                body_lines: List[str] = []
-                i += 1
+                body_lines: List[str] = []; i += 1
                 while i < len(lines) and not re.match(r"ENDFOR", lines[i], re.I):
                     if lines[i].strip() == "}":
-                        i += 1
-                        continue
-                    body_lines.append(lines[i])
-                    i += 1
-                if i == len(lines):
-                    raise ValueError("ENDFOR missing")
+                        i += 1; continue
+                    body_lines.append(lines[i]); i += 1
+                if i == len(lines): raise ValueError("ENDFOR missing")
                 i += 1
-                # Use real newlines for the sub-program body
                 body_text = "\n".join(body_lines) + "\n"
                 self.instructions.append(Instr("FOR_IN_REG", (var, reg, body_text)))
                 continue
