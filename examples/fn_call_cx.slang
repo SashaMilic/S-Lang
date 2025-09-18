@@ -1,0 +1,11 @@
+SEED 1
+ALLOCATE r 3
+
+FN CX(a,b) {
+  CNOT r[a], r[b]
+}
+ENDFN
+
+H r[0]
+CALL CX(0,1)
+MEASURE r SHOTS 16

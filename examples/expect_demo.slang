@@ -1,0 +1,8 @@
+SEED 1
+ALLOCATE r 2
+H r[0]
+CNOT r[0], r[1]
+
+EXPECT "ZZ" r[0], r[1]
+VAR "ZZ" r[0], r[1]
+MEASURE r SHOTS 16

@@ -12,19 +12,17 @@ class Transpiler:
 
     def __post_init__(self):
         p = self.program
-        if p.n_qubits is None:
-            raise ValueError("Program must ALLOCATE before transpile")
+        if p.n_qubits is None: raise ValueError("Program must ALLOCATE before transpile")
         self.n = p.n_qubits; self.r = p.reg_name
         self.lines: List[str] = []
         self.stats = {"cx": 0, "ccx": 0, "t": 0, "tdg": 0, "h": 0, "cp": 0}
-        self.depth = [0] * self.n
-        self.twoq_depth = [0] * self.n
-        self.tstage = [0] * self.n
-        self.t_block = [True] * self.n
+        self.depth = [0] * self.n; self.twoq_depth = [0] * self.n
+        self.tstage = [0] * self.n; self.t_block = [True] * self.n
         self.cbit_to_index: Dict[str, int] = {}
-        self._adj = {q: set() for q in range(self.n)}
+        self.fn_defs = dict(getattr(p, "fn_defs", {}))
+        self._adj = {q:set() for q in range(self.n)}
         if self.coupling_map:
-            for a, b in self.coupling_map:
+            for a,b in self.coupling_map:
                 self._adj[a].add(b); self._adj[b].add(a)
 
     # ---- metrics helpers ----
@@ -44,19 +42,17 @@ class Transpiler:
         self.stats[name] += 1
         self._add(f"{name} r[{q}];")
 
-    # ---- emits ----
+    # ---- 1- and 2-qubit ----
     def _h(self, q): self._add(f"h r[{q}];"); self.stats["h"] += 1; self._sched([q]); self._barrier([q])
     def _x(self, q): self._add(f"x r[{q}];"); self._sched([q]); self._barrier([q])
     def _z(self, q): self._add(f"z r[{q}];")
     def _rz(self, theta, q): self._add(f"rz({theta}) r[{q}];")
     def _tgate(self, q): self._t(q, "t")
     def _tdg(self, q): self._t(q, "tdg")
-    def _cx_prim(self, a, b): self._add(f"cx r[{a}], r[{b}];"); self.stats["cx"] += 1; self._sched([a, b], twoq_weight=1); self._barrier([a, b])
+    def _cp(self, a, b, theta): self._add(f"cp({theta}) r[{a}], r[{b}];"); self.stats["cp"] += 1; self._sched([a,b],twoq_weight=1); self._barrier([a,b])
+    def _cx_prim(self, a, b): self._add(f"cx r[{a}], r[{b}];"); self.stats["cx"] += 1; self._sched([a,b],twoq_weight=1); self._barrier([a,b])
 
-    def _swap(self, a, b):
-        # three cx swap; route-aware via _cx to honor coupling
-        self._cx(a, b); self._cx(b, a); self._cx(a, b)
-
+    # ---- CCX decomp (exact 7-T) ----
     def _ccx_decomp(self, a, b, c):
         self._h(c)
         self._tgate(a); self._tgate(b); self._tgate(c)
@@ -66,7 +62,7 @@ class Transpiler:
         self._cx_prim(a, c)
         self._h(c)
 
-    # routing
+    # ---- routing for CX ----
     def _path(self, u: int, v: int):
         if u == v: return [u]
         from collections import deque
@@ -77,40 +73,61 @@ class Transpiler:
                 if y in prev: continue
                 prev[y] = x; q.append(y)
                 if y == v:
-                    path = [v]; cur = v
-                    while prev[cur] is not None:
-                        cur = prev[cur]; path.append(cur)
+                    path=[v]; cur=v
+                    while prev[cur] is not None: cur=prev[cur]; path.append(cur)
                     path.reverse(); return path
         return None
-
     def _cx(self, a, b):
         if not self.coupling_map or b in self._adj[a]:
             self._cx_prim(a, b); return
         path = self._path(a, b)
         if not path or len(path) < 2:
             self._cx_prim(a, b); return
-        cur = a
+        cur=a
         for nxt in path[1:-1]:
             self._cx_prim(cur, nxt); self._cx_prim(nxt, cur); self._cx_prim(cur, nxt)
-            cur = nxt
+            cur=nxt
         self._cx_prim(cur, b)
 
-    # ---- high-level ----
+    def _swap(self,a,b): self._cx(a,b); self._cx(b,a); self._cx(a,b)
+
+    # ---- high-level blocks ----
     def _diffusion(self):
-        n = self.n; t = n - 1
+        n=self.n; t=n-1
         for q in range(n): self._h(q)
         for q in range(n): self._x(q)
-        self._h(t)
-        if n >= 3: self._ccx_decomp(0, 1, t)
+        # exact phase flip on |11..1| via H target + MCX + H (for n<=3)
+        if n==1:
+            self._z(0)
+        elif n==2:
+            self._h(t); self._cx(0,t); self._h(t)
+        elif n==3:
+            self._h(t); self._ccx_decomp(0,1,t); self._h(t)
+        else:
+            self._add(f"// TODO: exact MCX for n>{3} (phase-correct); using placeholder")
+            self._h(t); self._add("// [placeholder mct]"); self._h(t)
         for q in range(n): self._x(q)
         for q in range(n): self._h(q)
 
-    def _cp(self, ctrl: int, targ: int, theta: float):
-        # OpenQASM 3 has cp(theta)
-        self._add(f"cp({theta}) r[{ctrl}], r[{targ}];")
-        self.stats["cp"] += 1
-        self._sched([ctrl, targ], twoq_weight=1)
-        self._barrier([ctrl, targ])
+    def _markstate(self, bitstr: str):
+        n=self.n
+        if len(bitstr)!=n: self._add(f"// ERROR: MARKSTATE length mismatch"); return
+        # X on zeros to map |bitstr> to |11..1>
+        for i, b in enumerate(reversed(bitstr)):  # r[0] is LSB
+            if b=='0': self._x(i)
+        t=n-1
+        if n==1:
+            self._z(0)
+        elif n==2:
+            self._h(t); self._cx(0,t); self._h(t)
+        elif n==3:
+            self._h(t); self._ccx_decomp(0,1,t); self._h(t)
+        else:
+            self._add(f"// TODO: exact MCX for n>{3}; placeholder oracle")
+            self._h(t); self._add("// [placeholder mct]"); self._h(t)
+        # uncompute X on zeros
+        for i, b in enumerate(reversed(bitstr)):
+            if b=='0': self._x(i)
 
     def _qft(self, noswap: bool):
         n = self.n
@@ -120,14 +137,12 @@ class Transpiler:
                 theta = math.pi / (2**(k-j))
                 self._cp(k, j, theta)
         if not noswap:
-            for i in range(n//2):
-                self._swap(i, n-1-i)
+            for i in range(n//2): self._swap(i, n-1-i)
 
     def _iqft(self, reverse_swaps: bool):
         n = self.n
         if reverse_swaps:
-            for i in range(n//2):
-                self._swap(i, n-1-i)
+            for i in range(n//2): self._swap(i, n-1-i)
         for j in reversed(range(n)):
             for k in reversed(range(j+1, n)):
                 theta = -math.pi / (2**(k-j))
@@ -159,10 +174,11 @@ class Transpiler:
                 emit_body(body); self._add("} else if (" + mapc(right) + ") {"); emit_body(body); self._add("}"); continue
             self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}")
 
+    # ---- emission driver ----
     def _emit(self, instrs):
         for ins in instrs:
             op, args = ins.op, ins.args
-            if op in ("ALLOCATE", "LET"): continue
+            if op in ("ALLOCATE", "LET", "FN_DEF"): continue
             if op in ("H", "X", "Z"):
                 q = int(eval(args[1], {"__builtins__": None}, {}))
                 {"H": self._h, "X": self._x, "Z": self._z}[op](q); continue
@@ -174,18 +190,24 @@ class Transpiler:
                 for q in range(self.n): self._h(q); continue
             if op == "DIFFUSION":
                 self._diffusion(); continue
-
-            # NEW: QFT/IQFT
+            if op == "MARKSTATE":
+                _, bitstr = args; self._markstate(bitstr); continue
+            if op == "GROVER_ITERATE":
+                _, bitstr = args; self._markstate(bitstr); self._diffusion(); continue
             if op == "QFT":
                 _, noswap = args; self._qft(noswap); continue
             if op == "IQFT":
                 _, reverse_swaps = args; self._iqft(reverse_swaps); continue
-
             if op == "MEASURE_ONE_EXPR":
-                q = int(eval(args[1], {"__builtins__": None}, {}))
-                self._add(f"c[{q}] = measure r[{q}];"); self._barrier([q]); continue
+                q = int(eval(args[1], {"__builtins__": None}, {})); self._add(f"c[{q}] = measure r[{q}];"); self._barrier([q]); continue
             if op == "MEASURE_ALL":
                 self._add("c = measure r;"); self._barrier(range(self.n)); continue
+            if op == "EXPECT":
+                pauli, regs = args
+                self._add(f"// EXPECT \"{pauli}\" on {', '.join(regs)}  (interpreter-only)"); continue
+            if op == "VAR":
+                pauli, regs = args
+                self._add(f"// VAR \"{pauli}\" on {', '.join(regs)}  (interpreter-only)"); continue
             if op == "IF_CHAIN":
                 (blocks,) = args; self._emit_if_chain(blocks); continue
             if op == "FOR_IN_REG":
@@ -196,6 +218,19 @@ class Transpiler:
                     sub = Program(sub_text).parse()
                     self._emit(sub.instructions)
                 continue
+            if op == "CALL":
+                # inline body with integer substitutions (like interpreter)
+                name, vals = args
+                if name not in self.fn_defs:
+                    self._add(f"// ERROR: unknown CALL {name}"); continue
+                formal, body = self.fn_defs[name]
+                if len(formal) != len(vals):
+                    self._add(f"// ERROR: CALL {name} arity mismatch"); continue
+                sub = body
+                for f,v in zip(formal, vals):
+                    sub = re.sub(rf"\br\[\s*{re.escape(f)}\s*\]", f"r[{int(eval(v, {'__builtins__':None}, {}))}]", sub)
+                sub_p = Program(sub).parse()
+                self._emit(sub_p.instructions); continue
 
     def to_qasm3(self) -> str:
         self.lines = [
@@ -204,6 +239,7 @@ class Transpiler:
             f"qubit[{self.n}] {self.r};",
             f"bit[{self.n}] c;",
         ]
+        # map named cbits
         for ins in self.program.instructions:
             if ins.op == "MEASURE_ONE_EXPR":
                 _, qexpr, sym = ins.args
@@ -216,7 +252,7 @@ class Transpiler:
         depth = max(self.depth) if self.depth else 0
         twoq_depth = max(self.twoq_depth) if self.twoq_depth else 0
         twoq_count = self.stats["cx"] + self.stats["ccx"] + self.stats["cp"]
-        twoq_equiv = twoq_count + self.stats["ccx"]  # ccx=2x equiv; cp counts as 1x
+        twoq_equiv = self.stats["cx"] + 2*self.stats["ccx"] + self.stats["cp"]
         tcount = self.stats["t"] + self.stats["tdg"]
         tdepth = max(self.tstage) if self.tstage else 0
 
