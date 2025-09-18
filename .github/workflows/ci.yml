@@ -36,4 +36,25 @@ jobs:
           pip install ".[qiskit,test]"
 
       - name: Run tests
-        run: pytest
+        run: pytest -q
+
+      - name: Transpile examples (classic)
+        run: make transpile
+
+      - name: Transpile examples (IR)
+        run: make transpile-ir
+
+      - name: Verify IR on examples
+        run: make verify
+
+      - name: Run metrics (Qiskit)
+        run: make metrics-ci
+
+      - name: Upload QASM outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qasm-out-${{ matrix.python-version }}
+          path: |
+            out/*.qasm
+          if-no-files-found: ignore

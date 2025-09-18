@@ -1,8 +1,26 @@
 from .parser import Program, eval_expr
 from .runtime import StateVector, H, X, Z, Rz, CNOT_4
+import numpy as np
+import math, cmath, re, os
+from typing import List
+
+def _cr_phase(theta: float) -> np.ndarray:
+    return np.diag([1,1,1, cmath.exp(1j*theta)]).astype(np.complex128)
+
+# Pauli matrices for EXPECT/VAR
+_P = {
+    "I": np.eye(2, dtype=np.complex128),
+    "X": np.array([[0,1],[1,0]], dtype=np.complex128),
+    "Y": np.array([[0,-1j],[1j,0]], dtype=np.complex128),
+    "Z": np.array([[1,0],[0,-1]], dtype=np.complex128),
+}
+
+class ReturnSignal(Exception):
+    def __init__(self, value):
+        self.value = value
 
 class Interpreter:
-    """Tiny statevector interpreter for a subset of S-Lang."""
+    """Tiny statevector interpreter for a subset of S-Lang (+ Grover, EXPECT/VAR, FN/CALL)."""
     def __init__(self, program: Program):
         if program.n_qubits is None:
             raise ValueError("Program must ALLOCATE before run")
@@ -11,6 +29,21 @@ class Interpreter:
         self.env = {}
         self.cbits = {}
         self.counts = None
+        if program.seed is not None:
+            try:
+                # If your StateVector uses numpy’s RNG internally,
+                # this will make sample_all() deterministic.
+                np.random.seed(program.seed)
+            except Exception:
+                pass
+        self.fn_defs = dict(getattr(program, "fn_defs", {}))
+
+    def _eval_int(self, expr: str) -> int:
+        scope = {"__builtins__": None}
+        # allow previously computed LET variables
+        for k, v in self.env.items():
+            scope[k] = int(v) if isinstance(v, (int, float)) else v
+        return int(eval(expr, scope, {}))
 
     def _idx(self, expr: str) -> int:
         val = int(round(eval(expr, {"__builtins__": None}, {})))
@@ -19,16 +52,42 @@ class Interpreter:
         return val
 
     def _run_text(self, text: str):
+        # Parse a snippet (FN body, IF/ELSE body, loop body) and inherit
+        # the parent program's allocation context so we don't require an
+        # ALLOCATE inside the snippet.
         sub = Program(text).parse()
+        # Inherit context from parent and MERGE function defs
+        sub.n_qubits = self.p.n_qubits
+        sub.reg_name = self.p.reg_name
+        # Keep sub's own parsed fn_defs and also add parent's
+        merged_fns = dict(sub.fn_defs)
+        merged_fns.update(self.fn_defs)
+        sub.fn_defs = merged_fns
+
+        # Execute in the same runtime state
         it = Interpreter(sub)
         it.state = self.state
         it.env = self.env
         it.cbits = self.cbits
-        it.run()
+        # pass merged fn table
+        it.fn_defs = dict(sub.fn_defs)
+
+        try:
+            it.run()
+        except ReturnSignal as rs:
+            # Propagate state and the return to the caller
+            self.state = it.state
+            self.env = it.env
+            self.cbits = it.cbits
+            self.counts = it.counts
+            self.fn_defs = it.fn_defs
+            raise
+        # Propagate back
         self.state = it.state
         self.env = it.env
         self.cbits = it.cbits
         self.counts = it.counts
+        self.fn_defs = it.fn_defs
 
     def _cond(self, expr: str) -> bool:
         s = expr
@@ -39,87 +98,249 @@ class Interpreter:
         except Exception:
             return False
 
+    # ---- QFT/IQFT helpers ----
+    def _swap(self, a:int, b:int):
+        self.state.apply_two(a,b,CNOT_4)
+        self.state.apply_two(b,a,CNOT_4)
+        self.state.apply_two(a,b,CNOT_4)
+
+    def _qft(self, noswap: bool):
+        n = self.p.n_qubits
+        for j in range(n):
+            self.state.apply_single(j, H)
+            for k in range(j+1, n):
+                theta = math.pi / (2**(k-j))
+                self.state.apply_two(k, j, _cr_phase(theta))
+        if not noswap:
+            for i in range(n//2):
+                self._swap(i, n-1-i)
+
+    def _iqft(self, reverse_swaps: bool):
+        n = self.p.n_qubits
+        if reverse_swaps:
+            for i in range(n//2):
+                self._swap(i, n-1-i)
+        for j in reversed(range(n)):
+            for k in reversed(range(j+1, n)):
+                theta = -math.pi / (2**(k-j))
+                self.state.apply_two(k, j, _cr_phase(theta))
+            self.state.apply_single(j, H)
+
+    # ---- Grover helpers ----
+    def _markstate(self, bitstr: str):
+        # phase flip on the single basis state matching bitstr
+        if len(bitstr) != self.p.n_qubits:
+            raise ValueError("MARKSTATE bitstring length must match register size")
+        n = self.p.n_qubits
+        # Compute basis index with leftmost char = MSB
+        idx = 0
+        for i, b in enumerate(bitstr):          # i = 0..n-1 over MSB..LSB
+            if b == '1':
+                idx |= (1 << (n - 1 - i))       # set bit (MSB at position n-1)
+        self.state.state[idx] *= -1
+
+    def _diffusion_exact(self):
+        # Inversion about the mean: H^n X^n (phase flip on |0...0>) X^n H^n
+        n = self.p.n_qubits
+        for q in range(n): self.state.apply_single(q, H)
+        for q in range(n): self.state.apply_single(q, X)
+        # phase flip on |0...0>
+        self.state.state[0] *= -1
+        for q in range(n): self.state.apply_single(q, X)
+        for q in range(n): self.state.apply_single(q, H)
+
+    # ---- EXPECT / VAR ----
+    def _parse_indices(self, parts: List[str]) -> List[int]:
+        idxs=[]
+        for s in parts:
+            m = re.match(r"\w+\[\s*(.+)\s*\]$", s)
+            if not m: raise ValueError(f"Bad qubit ref: {s}")
+            idxs.append(self._idx(m.group(1)))
+        return idxs
+
+    def _expect_pauli(self, pauli: str, qubits: List[int]) -> float:
+        if len(pauli) != len(qubits):
+            raise ValueError("Pauli string length must match number of qubits")
+        # Build full operator on n qubits (tensor I on others)
+        ops = {q:_P[p] for p,q in zip(pauli, qubits)}
+        N = self.p.n_qubits
+        full = None
+        for q in range(N-1, -1, -1):  # big-endian Kron order to match state basis
+            op = ops.get(q, _P["I"])
+            full = op if full is None else np.kron(op, full)
+        psi = self.state.state
+        val = np.vdot(psi, full @ psi)
+        return float(val.real)  # imaginary should be ~0
+
     def run(self):
         for ins in self.p.instructions:
             op, args = ins.op, ins.args
 
-            if op in ("ALLOCATE", "LET"):
+            if op in ("ALLOCATE", "FN_DEF"):
+                continue
+
+            if op == "LET":
+                name, expr = args
+                self.env[name] = self._eval_int(expr)
+                continue
+
+            if op == "IMPORT":
+                (path_literal,) = args
+                path = path_literal.strip('"')
+                with open(path, "r") as f:
+                    text = f.read()
+                sub = Program(text).parse()
+                # Merge imported function definitions into current table
+                self.fn_defs.update(sub.fn_defs)
+                # We intentionally do NOT execute the module at import time.
+                continue
+
+            if op == "TRACE":
+                (msg_literal,) = args
+                msg = msg_literal.strip('"')
+                print(f"[TRACE] {msg}")
+                continue
+
+            if op == "DUMPSTATE":
+                n = self.p.n_qubits
+                psi = self.state.state
+                print("[DUMPSTATE] amplitudes (non-zero):")
+                for i, amp in enumerate(psi):
+                    if abs(amp) > 1e-12:
+                        print(f"  |{i:0{n}b}>: amp={amp.real:+.6f}{amp.imag:+.6f}j  p={abs(amp)**2:.6f}")
+                continue
+
+            if op == "PROBS":
+                n = self.p.n_qubits
+                psi = self.state.state
+                from collections import defaultdict
+                probs = defaultdict(float)
+                for i, amp in enumerate(psi):
+                    p = float((amp.conjugate() * amp).real)
+                    if p > 1e-12:
+                        probs[f"{i:0{n}b}"] += p
+                print("[PROBS]")
+                for k in sorted(probs.keys()):
+                    print(f"  {k}: {probs[k]:.6f}")
+                continue
+
+            if op == "RETURN":
+                (expr,) = args
+                raise ReturnSignal(self._eval_int(expr))
+
+            if op == "CALLR":
+                fname, vals, target = args
+                if fname not in self.fn_defs:
+                    raise ValueError(f"Unknown function {fname}")
+                formal, body = self.fn_defs[fname]
+                if len(formal) != len(vals):
+                    raise ValueError("CALLR arity mismatch")
+                # Evaluate actual arguments once
+                evald = []
+                for v in vals:
+                    evald.append(int(eval(v, {"__builtins__": None}, {})))
+                # Textual substitution for qubit indices and bare symbols
+                subst = body
+                for f, vnum in zip(formal, evald):
+                    # replace qubit-indexed occurrences
+                    subst = re.sub(rf"\br\[\s*{re.escape(f)}\s*\]", f"r[{vnum}]", subst)
+                    # replace bare parameter tokens in expressions (e.g., RETURN a+b)
+                    subst = re.sub(rf"\b{re.escape(f)}\b", str(vnum), subst)
+                try:
+                    self._run_text(subst)
+                except ReturnSignal as rs:
+                    self.env[target] = int(rs.value)
+                else:
+                    # No RETURN in function body -> default 0
+                    self.env[target] = 0
                 continue
 
             if op in ("H", "X", "Z"):
                 q = self._idx(args[1])
-                if op == "H":
-                    self.state.apply_single(q, H)
-                elif op == "X":
-                    self.state.apply_single(q, X)
-                elif op == "Z":
-                    self.state.apply_single(q, Z)
+                if op == "H": self.state.apply_single(q, H)
+                elif op == "X": self.state.apply_single(q, X)
+                elif op == "Z": self.state.apply_single(q, Z)
                 continue
 
             if op == "RZ_EXPR":
-                q = self._idx(args[1])
-                theta = float(eval(args[2], {"__builtins__": None, "pi": 3.1415926535}))
-                self.state.apply_single(q, Rz(theta))
-                continue
+                q = self._idx(args[1]); theta = float(eval(args[2], {"__builtins__": None, "pi": math.pi}))
+                self.state.apply_single(q, Rz(theta)); continue
 
             if op == "CNOT_EXPR":
-                c = self._idx(args[1])
-                t = self._idx(args[2])
-                self.state.apply_two(c, t, CNOT_4)
-                continue
+                c = self._idx(args[1]); t = self._idx(args[2]); self.state.apply_two(c, t, CNOT_4); continue
 
             if op == "HADAMARD_LAYER":
-                for q in range(self.p.n_qubits):
-                    self.state.apply_single(q, H)
-                continue
+                for q in range(self.p.n_qubits): self.state.apply_single(q, H); continue
 
             if op == "DIFFUSION":
-                # very toy: H->X->CX(last-1,last)->X->H
-                n = self.p.n_qubits
-                for q in range(n):
-                    self.state.apply_single(q, H)
-                for q in range(n):
-                    self.state.apply_single(q, X)
-                if n >= 2:
-                    self.state.apply_two(n - 2, n - 1, CNOT_4)
-                for q in range(n):
-                    self.state.apply_single(q, X)
-                for q in range(n):
-                    self.state.apply_single(q, H)
+                self._diffusion_exact(); continue
+
+            if op == "MARKSTATE":
+                _, bitstr = args; self._markstate(bitstr); continue
+
+            if op == "GROVER_ITERATE":
+                _, bitstr = args; self._markstate(bitstr); self._diffusion_exact(); continue
+
+            if op == "QFT":
+                _, noswap = args; self._qft(noswap); continue
+
+            if op == "IQFT":
+                _, reverse_swaps = args; self._iqft(reverse_swaps); continue
+
+            if op == "EXPECT":
+                pauli, regs = args
+                idxs = self._parse_indices(regs)
+                val = self._expect_pauli(pauli, idxs)
+                print(f"EXPECT {pauli} on {idxs} = {val:.6f}")
+                continue
+
+            if op == "VAR":
+                pauli, regs = args
+                idxs = self._parse_indices(regs)
+                e = self._expect_pauli(pauli, idxs)
+                # Var(P) = 1 - <P>^2 for Pauli (eigenvalues ±1)
+                var = 1.0 - e*e
+                print(f"VAR {pauli} on {idxs} = {var:.6f}")
                 continue
 
             if op == "MEASURE_ONE_EXPR":
                 q = self._idx(args[1])
-                # sample one shot on full register and read bit q
-                c = self.state.sample_all(1)
-                bit = list(c.keys())[0][q]
-                self.cbits[args[2]] = int(bit)
-                continue
+                c = self.state.sample_all(1); bit = list(c.keys())[0][q]
+                self.cbits[args[2]] = int(bit); continue
 
             if op == "MEASURE_ALL":
-                shots = args[1]
-                self.counts = self.state.sample_all(shots)
-                continue
+                shots = args[1]; self.counts = self.state.sample_all(shots); continue
 
             if op == "IF_CHAIN":
                 (blocks,) = args
                 taken = False
                 for kind, cond, body in blocks:
                     if kind in ("IF", "ELIF") and (not taken) and self._cond(cond):
-                        self._run_text("\n".join(body) + "\n")
-                        taken = True
+                        self._run_text("\n".join(body) + "\n"); taken = True
                     elif kind == "ELSE" and not taken:
-                        self._run_text("\n".join(body) + "\n")
-                        taken = True
+                        self._run_text("\n".join(body) + "\n"); taken = True
                 continue
 
             if op == "FOR_IN_REG":
                 var, reg, body = args
-                # body uses real newlines; run once per qubit with substitution
                 for i in range(self.p.n_qubits):
                     self.env[var] = float(i)
                     self._run_text(body.replace("r[q]", f"r[{i}]"))
                 self.env.pop(var, None)
+                continue
+
+            if op == "CALL":
+                name, vals = args
+                if name not in self.fn_defs:
+                    raise ValueError(f"Unknown function {name}")
+                formal, body = self.fn_defs[name]
+                if len(formal) != len(vals):
+                    raise ValueError("CALL arity mismatch")
+                # simple textual substitution for indices
+                subst = body
+                for f, v in zip(formal, vals):
+                    subst = re.sub(rf"\br\[\s*{re.escape(f)}\s*\]", f"r[{int(eval(v, {'__builtins__':None}, {}))}]", subst)
+                self._run_text(subst)
                 continue
 
         return self.counts

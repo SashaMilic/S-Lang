@@ -3,7 +3,7 @@ from pathlib import Path
 from .parser import Program
 from .transpiler import Transpiler
 from .interpreter import Interpreter
-from .ir import lower_program_to_ir
+from .ir import lower_program_to_ir, verify_ir
 from .passes import run_pipeline
 
 def main(argv=None):
@@ -24,9 +24,18 @@ def main(argv=None):
 
     ap_ir = sub.add_parser("ir", help="Lower .slang to IR and dump")
     ap_ir.add_argument("src")
+    ap_ir.add_argument("--verbose", action="store_true", help="Include meta and verify messages in IR dump")
+    ap_ir.add_argument("--coupling", help="JSON list of undirected edges, e.g. [[0,1],[1,2]]")
 
     ap_pipe = sub.add_parser("pipeline", help="Run default pass pipeline and dump IR + log")
     ap_pipe.add_argument("src")
+    ap_pipe.add_argument("--verbose", action="store_true", help="Include meta in IR dump")
+    ap_pipe.add_argument("--coupling", help="JSON list of undirected edges, e.g. [[0,1],[1,2]]")
+
+    ap_ver = sub.add_parser("verify", help="Verify IR after lowering; print errors and exit 1 on failure")
+    ap_ver.add_argument("src")
+    ap_ver.add_argument("--coupling", help="JSON list of undirected edges, e.g. [[0,1],[1,2]]")
+    ap_ver.add_argument("--verbose", action="store_true", help="Dump IR (with meta) before reporting")
 
     args = ap.parse_args(argv)
 
@@ -60,17 +69,41 @@ def main(argv=None):
         src = Path(args.src).read_text()
         p = Program(src).parse()
         m = lower_program_to_ir(p)
-        print(m.dump())
+        if getattr(args, "coupling", None):
+            # Convert to list of tuples for router pass compatibility
+            pairs = json.loads(args.coupling)
+            m.meta["coupling"] = [tuple(pair) for pair in pairs]
+        print(m.dump(include_meta=bool(getattr(args, "verbose", False))))
 
     elif args.cmd == "pipeline":
         src = Path(args.src).read_text()
         p = Program(src).parse()
         m = lower_program_to_ir(p)
+        if getattr(args, "coupling", None):
+            pairs = json.loads(args.coupling)
+            m.meta["coupling"] = [tuple(pair) for pair in pairs]
         ctx = run_pipeline(m)
-        print(m.dump())
+        print(m.dump(include_meta=bool(getattr(args, "verbose", False))))
         print("\n-- pipeline log --")
         for line in ctx.log:
             print(line)
+
+    elif args.cmd == "verify":
+        src = Path(args.src).read_text()
+        p = Program(src).parse()
+        m = lower_program_to_ir(p)
+        if getattr(args, "coupling", None):
+            pairs = json.loads(args.coupling)
+            m.meta["coupling"] = [tuple(pair) for pair in pairs]
+        errs = verify_ir(m)
+        if args.verbose:
+            print(m.dump(include_meta=True))
+        if errs:
+            for e in errs:
+                print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print("OK")
 
 if __name__ == "__main__":
     main()
