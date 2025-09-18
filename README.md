@@ -1,7 +1,6 @@
 # S-Lang
 A quantum-native programming language where the unit of computation is a state in a Hilbert space (a superposition), not a bitstring. It operates on states and subspaces using linear operators, with measurement treated as an explicit effect.
 
-
 # S-Lang (toy quantum DSL) – repo scaffold
 
 This repository contains a small quantum domain-specific language ("S‑Lang"):
@@ -56,6 +55,15 @@ slang-repo/
 - **Metrics** (footer in QASM): overall depth, two‑qubit depth, two‑qubit counts/equivalent, T‑count, **global T‑depth** with Clifford commuting
 - **Routing**: give a `coupling_map=[(0,1),(1,2),...]` to insert SWAPs for non‑adjacent CX
 - **CCX decomposition**: optional 7‑T Clifford+T Toffoli with precise T metrics
+
+## Content
+
+slang/          # package (parser, interpreter, transpiler, CLI)
+tools/          # qasm_to_qiskit_metrics.py
+examples/       # demo programs
+tests/          # pytest smoke
+README.md
+requirements.txt
 
 ## License
 

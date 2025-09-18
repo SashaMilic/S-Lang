@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slang"
+version = "0.1.0"
+description = "S-Lang: a tiny educational quantum DSL with a toy interpreter and an OpenQASM 3 transpiler."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Your Name" }]
+license = { text = "MIT" }
+
+dependencies = [
+  "numpy>=1.24"
+]
+
+[project.optional-dependencies]
+qiskit = ["qiskit>=1.0.0"]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["slang"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["."]
+testpaths = ["tests"]
