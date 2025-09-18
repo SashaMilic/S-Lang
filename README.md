@@ -1,6 +1,23 @@
 # S-Lang
 A quantum-native programming language where the unit of computation is a state in a Hilbert space (a superposition), not a bitstring. It operates on states and subspaces using linear operators, with measurement treated as an explicit effect.
 
+# Quick use Makefile
+
+## install just tests extra (so pytest exists)
+```bash
+make install-dev
+```
+## run your script wrapper
+```bash
+make sanity
+```
+## or run individual steps
+```bash
+make transpile
+make metrics
+make test
+```
+
 # S-Lang (toy quantum DSL) – repo scaffold
 
 This repository contains a small quantum domain-specific language ("S‑Lang"):
