@@ -1,48 +1,62 @@
 # S-Lang
 A quantum-native programming language where the unit of computation is a state in a Hilbert space (a superposition), not a bitstring. It operates on states and subspaces using linear operators, with measurement treated as an explicit effect.
 
-# Content
 
+# S-Lang (toy quantum DSL) – repo scaffold
+
+This repository contains a small quantum domain-specific language ("S‑Lang"):
+- A **parser** for a compact gate-level DSL,
+- A **statevector interpreter** for quick simulations,
+- A **QASM 3 transpiler** with accurate-ish metrics (depth, two‑qubit depth, T‑count, T‑depth),
+- Optional **routing** on a coupling map (inserts SWAPs),
+- A **QASM→Qiskit metrics loader** for parity.
+
+> Educational prototype; not a drop‑in replacement for production toolchains.
+
+## Quick start
+
+```bash
+python -m slang.cli transpile examples/bool_if_inline.slang --ancilla-budget 0 -o out/bool_if_inline.qasm
+python tools/qasm_to_qiskit_metrics.py out/bool_if_inline.qasm
+```
+
+Optional: install Qiskit to run the parity tools.
+```bash
+pip install qiskit
+```
+
+## Repo layout
+
+```
 slang-repo/
-  README.md
-  requirements.txt
   slang/
     __init__.py
-    runtime.py        # statevector + basic gates
-    parser.py         # S-Lang parser & AST
-    interpreter.py    # toy statevector interpreter (IF/ELIF/ELSE, FOR-IN, DIFFUSION)
-    transpiler.py     # OpenQASM 3 emitter + metrics + routing + CCX decomposition
-    cli.py            # CLI: transpile / run
+    runtime.py        # statevector & gates
+    parser.py         # Program + AST
+    interpreter.py    # executes a subset of the language
+    transpiler.py     # QASM3 emission, metrics, routing, ccx decomposition
+    cli.py            # tiny CLI: transpile / run
   tools/
-    qasm_to_qiskit_metrics.py   # QASM→Qiskit loader that prints the same metrics
+    qasm_to_qiskit_metrics.py  # loads QASM, prints metrics via Qiskit
   examples/
-    bool_if_inline.slang
-    loop_sugar.slang
-    diffusion_anc0.slang
-    routed_line_cx.slang
+    *.slang           # demo programs
   tests/
-    test_smoke.py
+    test_smoke.py     # smoke tests for parsing and transpiling
+  README.md
+  requirements.txt
+```
 
+## Features in this snapshot
 
-# Quick start
+- Gates: `H, X, Z, RZ theta, CNOT a,b, HADAMARD_LAYER r`
+- Stdlib-like: `DIFFUSION r` (toy; exercises MCX/CCX/T patterns)
+- Measurement: `MEASURE r[i] AS name`, `MEASURE r SHOTS N`
+- Control flow: `IF/ELIF/ELSE` with arithmetic, `&&` / `||` short‑circuit lowering
+- Loop sugar: `FOR q IN r { … }` → unrolled over qubits
+- **Metrics** (footer in QASM): overall depth, two‑qubit depth, two‑qubit counts/equivalent, T‑count, **global T‑depth** with Clifford commuting
+- **Routing**: give a `coupling_map=[(0,1),(1,2),...]` to insert SWAPs for non‑adjacent CX
+- **CCX decomposition**: optional 7‑T Clifford+T Toffoli with precise T metrics
 
-## transpile to QASM (prints to stdout)
-python -m slang.cli transpile examples/bool_if_inline.slang
+## License
 
-## transpile with routing & CCX decomposition -> file
-python -m slang.cli transpile examples/routed_line_cx.slang \
-  --coupling '[[0,1],[1,2],[2,3],[3,4],[4,5]]' \
-  --ancilla-budget 0 \
-  -o out/routed.qasm
-
-## analyze QASM with Qiskit-based parity tool
-python tools/qasm_to_qiskit_metrics.py out/routed.qasm
-
-# Notes
-
-	•	The transpiler includes:
-	•	T-depth with Clifford commuting (global stage count),
-	•	Two-qubit depth and counts (and ccx as 2× equiv),
-	•	Optional SWAP routing on a coupling map (adds realistic CX overhead),
-	•	7-T Toffoli decomposition when decompose_ccx=True (on by default).
-	•	The interpreter is intentionally small; it runs H/X/Z/RZ/CNOT/HADAMARD_LAYER/DIFFUSION, IF/ELIF/ELSE, FOR-IN and simple measurements.
+MIT (prototype).

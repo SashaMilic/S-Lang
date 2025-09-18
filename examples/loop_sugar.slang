@@ -1,0 +1,7 @@
+SEED 7
+ALLOCATE r 3
+FOR q IN r {
+  H r[q]
+}
+ENDFOR
+MEASURE r SHOTS 64
