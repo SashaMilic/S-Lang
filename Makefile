@@ -19,7 +19,6 @@ EXAMPLES := \
   examples/routed_line_cx.slang
 
 # ---- Phony targets --------------------------------------------------------
-# add "verify" to your PHONY list (wherever you keep it)
 .PHONY: help install install-dev install-qiskit test transpile transpile-ir examples metrics metrics-ci sanity clean ir pipeline verify which-python doctor reinstall clean-pyc
 
 help:
