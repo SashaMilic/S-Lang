@@ -33,7 +33,7 @@ help:
 	@echo "  make metrics         - analyze QASM files in $(OUT)/ with tools/qasm_to_qiskit_metrics.py"
 	@echo "  make sanity          - run tools/sanity.sh"
 	@echo "  make clean           - remove build artifacts and $(OUT)/"
-	@echo "  make verify         - lower to IR and verify all examples (fails on error)"
+	@echo "  make verify          - lower to IR and verify all examples (fails on error)"
 	@echo "  make which-python    - print python/pip locations and versions"
 	@echo "  make doctor          - env sanity: python/pip/qiskit import checks"
 	@echo "  make reinstall       - uninstall + reinstall package (editable)"
