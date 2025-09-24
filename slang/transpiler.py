@@ -173,8 +173,15 @@ class Transpiler:
             return out
 
         def norm_cond(expr: str) -> str:
-            # Collapse doubled parentheses and trim whitespace.
+            """Normalize a boolean expression for QASM3:
+            - map named cbits to c[idx]
+            - strip stray leading '(' and trailing ')'
+            - collapse duplicate parentheses
+            - trim excess whitespace
+            """
             s = mapc(expr.strip())
+            s = re.sub(r"\s+", " ", s)
+            s = s.lstrip("(").rstrip(")")
             while "((" in s:
                 s = s.replace("((", "(")
             while "))" in s:
@@ -187,64 +194,52 @@ class Transpiler:
             sub = Program("\n".join(lines) + "\n").parse()
             self._emit(sub.instructions)
 
-        first = True
-        for kind, cond, body in blocks:
-            if first:
-                # First block must be IF
-                c = norm_cond(cond)
+        # Nested emitter: when nested=True, we emit only an 'if ... else ...' chain
+        # WITHOUT producing a leading 'else {' ... '}' wrapper. The caller decides
+        # whether to surround it in an 'else { ... }' scope.
+        def emit_tail(i: int, nested: bool):
+            if i >= len(blocks):
+                return
+            kind, cond, body = blocks[i]
+            if kind == "ELSE":
+                if nested:
+                    # direct body inside current else-scope
+                    emit_body(body)
+                else:
+                    # top-level final else
+                    self._add("else {")
+                    emit_body(body)
+                    self._add("}")
+                return
+            # 'ELIF' or any non-ELSE is treated as an else-if
+            c = norm_cond(cond)
+            if nested:
+                # inside an existing else { ... } scope: emit 'if (...) { body } else { <tail> }'
                 self._add(f"if ({c}) {{")
                 emit_body(body)
-                self._add("}")
-                first = False
-                continue
-
-            if kind == "ELSE":
+                if i + 1 < len(blocks):
+                    self._add("} else {")
+                    emit_tail(i + 1, nested=True)
+                    self._add("}")
+                else:
+                    self._add("}")
+            else:
+                # top-level after the head IF: wrap this chain in a single else { ... }
                 self._add("else {")
-                emit_body(body)
+                emit_tail(i, nested=True)
                 self._add("}")
-                continue
 
-            # For "else if" chains, emit as: else { if (cond) { ... } }
-            c = cond.strip()
-            # Handle compound ops with short-circuit lowering inside the nested if
-            if "&&" in c and "||" in c:
-                self._add("else {")
-                self._add(f"  if ({norm_cond(c)}) {{")
-                emit_body(body)
-                self._add("  }")
-                self._add("}")
-                continue
-
-            if "&&" in c:
-                left, right = [x.strip() for x in c.split("&&", 1)]
-                self._add("else {")
-                self._add(f"  if ({norm_cond(left)}) {{")
-                self._add(f"    if ({norm_cond(right)}) {{")
-                emit_body(body)
-                self._add("    }")
-                self._add("  }")
-                self._add("}")
-                continue
-
-            if "||" in c:
-                left, right = [x.strip() for x in c.split("||", 1)]
-                self._add("else {")
-                self._add(f"  if ({norm_cond(left)}) {{")
-                emit_body(body)
-                self._add("  } else {")
-                self._add(f"    if ({norm_cond(right)}) {{")
-                emit_body(body)
-                self._add("    }")
-                self._add("  }")
-                self._add("}")
-                continue
-
-            # Simple else-if case
-            self._add("else {")
-            self._add(f"  if ({norm_cond(c)}) {{")
-            emit_body(body)
-            self._add("  }")
-            self._add("}")
+        # Emit the head IF first
+        if not blocks:
+            return
+        kind0, cond0, body0 = blocks[0]
+        c0 = norm_cond(cond0)
+        self._add(f"if ({c0}) {{")
+        emit_body(body0)
+        self._add("}")
+        # Emit the remainder as a single, properly nested chain
+        if len(blocks) > 1:
+            emit_tail(1, nested=False)
 
     # ---- emission driver ----
     def _reset_emitter_state(self):

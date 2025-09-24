@@ -23,10 +23,23 @@ class Transpiler:
         self.tstage = [0] * self.n; self.t_block = [True] * self.n
         self.cbit_to_index: Dict[str, int] = {}
         self.fn_defs = dict(getattr(p, "fn_defs", {}))
-        self._adj = {q:set() for q in range(self.n)}
+        # Build symmetric adjacency for routing. Be robust to non-int entries
+        # or indices outside [0, n-1] by coercing to int and creating buckets
+        # on demand.
+        self._adj = {q: set() for q in range(self.n)}
         if self.coupling_map:
-            for a,b in self.coupling_map:
-                self._adj[a].add(b); self._adj[b].add(a)
+            for a, b in self.coupling_map:
+                # coerce to int if they came as strings
+                try:
+                    ai, bi = int(a), int(b)
+                except Exception:
+                    # skip malformed entries
+                    continue
+                # tolerate indices beyond current n by creating buckets
+                if ai not in self._adj: self._adj[ai] = set()
+                if bi not in self._adj: self._adj[bi] = set()
+                self._adj[ai].add(bi)
+                self._adj[bi].add(ai)
 
     # ---- metrics helpers ----
     def _add(self, s: str): self.lines.append(s)
@@ -152,30 +165,81 @@ class Transpiler:
                 self._cp(k, j, theta)
             self._h(j)
 
-    def _emit_if_chain(self, blocks: List[Tuple[str, str, List[str]]]):
-        def mapc(expr: str):
+    def _emit_if_chain(self, blocks: List[Tuple[str, str, List[str]]]):  # [(kind, cond, body)]
+        def mapc(expr: str) -> str:
             out = expr
             for name, idx in self.cbit_to_index.items():
-                out = re.sub(rf"\b{name}\b", f"c[{idx}]", out)
+                out = re.sub(rf"\b{re.escape(name)}\b", f"c[{idx}]", out)
             return out
+
+        def norm_cond(expr: str) -> str:
+            """Normalize a boolean expression for QASM3:
+            - map named cbits to c[idx]
+            - strip stray leading '(' and trailing ')'
+            - collapse duplicate parentheses
+            - trim excess whitespace
+            """
+            s = mapc(expr.strip())
+            s = re.sub(r"\s+", " ", s)
+            s = s.lstrip("(").rstrip(")")
+            while "((" in s:
+                s = s.replace("((", "(")
+            while "))" in s:
+                s = s.replace("))", ")")
+            s = re.sub(r"\(\s+", "(", s)
+            s = re.sub(r"\s+\)", ")", s)
+            return s
+
         def emit_body(lines: List[str]):
             sub = Program("\n".join(lines) + "\n").parse()
             self._emit(sub.instructions)
-        for kind, cond, body in blocks:
+
+        # Nested emitter: when nested=True, we emit only an 'if ... else ...' chain
+        # WITHOUT producing a leading 'else {' ... '}' wrapper. The caller decides
+        # whether to surround it in an 'else { ... }' scope.
+        def emit_tail(i: int, nested: bool):
+            if i >= len(blocks):
+                return
+            kind, cond, body = blocks[i]
             if kind == "ELSE":
-                self._add("else {"); emit_body(body); self._add("}"); continue
-            c = cond.strip()
-            if "&&" in c and "||" in c:
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}"); continue
-            if "&&" in c:
-                left, right = [x.strip() for x in c.split("&&", 1)]
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(left)}) {{")
-                self._add(f"  if ({mapc(right)}) {{"); emit_body(body); self._add("  }"); self._add("}"); continue
-            if "||" in c:
-                left, right = [x.strip() for x in c.split("||", 1)]
-                self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(left)}) {{")
-                emit_body(body); self._add("} else if (" + mapc(right) + ") {"); emit_body(body); self._add("}"); continue
-            self._add(f"{'if' if kind=='IF' else 'else if'} ({mapc(c)}) {{"); emit_body(body); self._add("}")
+                if nested:
+                    # direct body inside current else-scope
+                    emit_body(body)
+                else:
+                    # top-level final else
+                    self._add("else {")
+                    emit_body(body)
+                    self._add("}")
+                return
+            # 'ELIF' or any non-ELSE is treated as an else-if
+            c = norm_cond(cond)
+            if nested:
+                # inside an existing else { ... } scope: emit 'if (...) { body } else { <tail> }'
+                self._add(f"if ({c}) {{")
+                emit_body(body)
+                if i + 1 < len(blocks):
+                    self._add("} else {")
+                    emit_tail(i + 1, nested=True)
+                    self._add("}")
+                else:
+                    self._add("}")
+            else:
+                # top-level after the head IF: wrap this chain in a single else { ... }
+                self._add("else {")
+                emit_tail(i, nested=True)
+                self._add("}")
+
+        # Emit the head IF first
+        if not blocks:
+            return
+        kind0, cond0, body0 = blocks[0]
+        c0 = norm_cond(cond0)
+        self._add(f"if ({c0}) {{")
+        emit_body(body0)
+        self._add("}")
+        # Emit the remainder as a single, properly nested chain
+        if len(blocks) > 1:
+            emit_tail(1, nested=False)
 
     # ---- emission driver ----
     def _reset_emitter_state(self):

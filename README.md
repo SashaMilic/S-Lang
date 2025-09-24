@@ -33,6 +33,11 @@ This repository contains a small quantum domain-specific language ("S‑Lang"):
 
 ## Quick start
 
+python -m venv ./env          # Create python virtual environment (venv)
+brew install python3          # Install python over homebrew
+source ./env/bin/activate     # Activate virtual environment (venv)
+deactivate                    # Deactivate virtual environment (venv)
+
 ```bash
 python -m slang.cli transpile examples/bool_if_inline.slang --ancilla-budget 0 -o out/bool_if_inline.qasm
 python tools/qasm_to_qiskit_metrics.py out/bool_if_inline.qasm
@@ -40,7 +45,7 @@ python tools/qasm_to_qiskit_metrics.py out/bool_if_inline.qasm
 
 Optional: install Qiskit to run the parity tools.
 ```bash
-pip install qiskit
+pip install qiskit>=1.0
 ```
 
 ## Repo layout

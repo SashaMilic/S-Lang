@@ -1,4 +1,3 @@
-
 # ---- Config knobs ---------------------------------------------------------
 PY ?= python3
 PIP := $(PY) -m pip
@@ -21,7 +20,7 @@ EXAMPLES := \
 
 # ---- Phony targets --------------------------------------------------------
 # add "verify" to your PHONY list (wherever you keep it)
-.PHONY: help install install-dev install-qiskit test transpile transpile-ir examples metrics metrics-ci sanity clean ir pipeline verify
+.PHONY: help install install-dev install-qiskit test transpile transpile-ir examples metrics metrics-ci sanity clean ir pipeline verify which-python doctor reinstall clean-pyc
 
 help:
 	@echo "Targets:"
@@ -36,6 +35,10 @@ help:
 	@echo "  make sanity          - run tools/sanity.sh"
 	@echo "  make clean           - remove build artifacts and $(OUT)/"
 	@echo "  make verify         - lower to IR and verify all examples (fails on error)"
+	@echo "  make which-python    - print python/pip locations and versions"
+	@echo "  make doctor          - env sanity: python/pip/qiskit import checks"
+	@echo "  make reinstall       - uninstall + reinstall package (editable)"
+	@echo "  make clean-pyc       - remove __pycache__/*.py[co]"
 
 install:
 	$(PIP) install --upgrade pip
@@ -47,6 +50,49 @@ install-dev:
 
 install-qiskit:
 	$(PIP) install ".[qiskit]"
+
+# Show which python/pip are being used and versions
+which-python:
+	@echo "PY         = $(PY)"
+	@which $(PY) || true
+	@$(PY) -V || true
+	@echo "pip (module) = $$($(PY) -c 'import sys,shutil;print(shutil.which(\"pip\")) or print(\"(none)\")' 2>/dev/null || true)"
+	@$(PY) -m pip -V || true
+
+# Quick environment doctor
+doctor: which-python
+	@echo "---- python imports ----"
+	@printf '%s\n' \
+	'import sys' \
+	'print("sys.version:", sys.version.replace("\\n"," "))' \
+	'try:' \
+	'    import qiskit' \
+	'    print("qiskit:", getattr(qiskit, "__version__", "(ok)"))' \
+	'    try:' \
+	'        from qiskit.qasm3 import loads as _loads' \
+	'        print("qasm3.loads: OK")' \
+	'    except Exception as e:' \
+	'        print("qasm3.loads: FAIL", e)' \
+	'except Exception as e:' \
+	'    print("qiskit: FAIL", e)' \
+	'try:' \
+	'    import slang' \
+	'    print("slang import: OK")' \
+	'except Exception as e:' \
+	'    print("slang import: FAIL", e)' \
+	| $(PY) -
+	@echo "---- end doctor ----"
+
+# Reinstall package cleanly (editable mode); useful after Python changes
+reinstall: clean-pyc
+	-$(PY) -m pip uninstall -y S-Lang slang || true
+	$(PY) -m pip install --upgrade pip
+	$(PY) -m pip install -e ".[test,qiskit]"
+
+# Remove compiled artifacts
+clean-pyc:
+	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+	find . -name "*.pyc" -o -name "*.pyo" -o -name "*.pyd" -delete
 
 test:
 	$(PY) -m pytest -q
@@ -106,7 +152,8 @@ metrics-ci: transpile metrics
 sanity:
 	bash tools/sanity.sh
 
-clean:
+clean: clean-pyc
+	rm -rf $(OUT) *.egg-info build dist .pytest_cache
 	rm -rf $(OUT) __pycache__ .pytest_cache *.egg-info build dist
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 
@@ -125,4 +172,3 @@ verify:
 	  $(PY) -m slang.cli verify $$f --coupling '$(COUPLING)'; \
 	done
 	@echo "[verify] OK"
-

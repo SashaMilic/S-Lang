@@ -106,9 +106,20 @@ class IRBuilder:
 def verify_ir(m: QModule) -> List[str]:
     """Lightweight verifier: checks basic module meta and op arities."""
     errs: List[str] = []
+    # Only require reg/n_qubits if any qubit-touching ops are present.
+    needs_qubits = any(
+        op.op in {
+            "q.h","q.x","q.z","q.rz_expr","q.cnot_expr","q.swap_expr",
+            "q.qft","q.iqft","q.hadamard_layer","q.measure_all","q.measure_one_expr",
+            "q.diffusion","q.mcx_all","q.expect","q.var"
+        }
+        for fn in m.funcs.values()
+        for bb in fn.blocks
+        for op in bb.ops
+    )
     reg = m.meta.get("reg")
     n = m.meta.get("n_qubits")
-    if reg is None or n is None:
+    if needs_qubits and (reg is None or n is None):
         errs.append("meta missing: 'reg' or 'n_qubits'")
     # Check op arities for commonly used ops
     arity = {

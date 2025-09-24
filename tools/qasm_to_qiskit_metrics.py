@@ -12,23 +12,18 @@ def _first_noncomment_line(text: str) -> str:
     return ""
 
 def _normalize_qasm3(text: str) -> str:
-    # 1) strip std include (Qiskit defines builtins in the loader)
-    lines = []
-    for ln in text.splitlines():
-        if ln.strip().startswith('include "stdgates.inc"'):
-            continue
-        lines.append(ln)
-    s = "\n".join(lines)
+    # IMPORTANT: Do NOT strip the stdgates include; Qiskit needs it to define gates like h, cx, x, z.
+    s = text
 
-    # 2) fix conditional syntax issues produced by current emitter
-    #    - 'else if' -> 'elif' (OpenQASM 3 supports 'elif')
-    s = re.sub(r"\belse\s+if\b", "elif", s)
+    # Fix conditional syntax issues the current emitter can produce.
+    # - 'else if' -> 'elif' (OpenQASM 3 supports 'elif')
+    s = re.sub(r"\belse\s+if\b", "elif", s, flags=re.MULTILINE)
 
-    #    - collapse 'if ((expr)' -> 'if (expr' and ') ) {' -> ') {'
-    s = re.sub(r"\bif\s*\(\s*\(", "if (", s)    # if (( ... -> if (
-    s = re.sub(r"\)\s*\)\s*\{", ") {", s)       # ... )) { -> ... ) {
+    # - collapse 'if ((expr' -> 'if (expr' and ')) {' -> ') {'
+    s = re.sub(r"\bif\s*\(\s*\(", "if (", s)
+    s = re.sub(r"\)\s*\)\s*\{", ") {", s)
 
-    #    - also handle the pattern 'elif ((expr)' -> 'elif (expr'
+    # - also handle 'elif ((expr' -> 'elif (expr'
     s = re.sub(r"\belif\s*\(\s*\(", "elif (", s)
 
     return s
@@ -76,20 +71,22 @@ def compute_metrics(qc):
 
     return {
         "depth": depth,
-        "two_qubit_count": twoq + ccx,
+        "two_qubit_count": twoq,
         "two_qubit_equiv": twoq_equiv,
         "tcount": tcount,
         "tdepth": tdepth,
-        "counts": dict(counts),
     }
 
 def main():
+    # Keep the original one-arg interface used by `make metrics`.
     if len(sys.argv) != 2:
         print("usage: python tools/qasm_to_qiskit_metrics.py <file.qasm>", file=sys.stderr)
         sys.exit(2)
+
     path = Path(sys.argv[1])
     if not path.exists():
-        print(f"no such file: {path}", file=sys.stderr); sys.exit(2)
+        print(f"no such file: {path}", file=sys.stderr)
+        sys.exit(2)
 
     text = path.read_text()
     try:
@@ -99,7 +96,8 @@ def main():
         print(f"  file: {path}", file=sys.stderr)
         head = _first_noncomment_line(text)
         print(f"  head: {head}", file=sys.stderr)
-        preview = "\n".join(text.splitlines()[:40])
+
+        preview = "\n".join(text.splitlines()[:50])
         print("  --- preview ---", file=sys.stderr)
         print(preview, file=sys.stderr)
         print("  ---------------", file=sys.stderr)
